@@ -26,7 +26,15 @@
     </div>
 
     <div class="column-cards">
+      <div v-if="cardsError" class="cards-error">
+        <el-icon><WarningFilled /></el-icon>
+        <p>{{ cardsError }}</p>
+        <el-button size="small" type="primary" plain @click="$emit('retry-cards', column.id)">
+          Retry
+        </el-button>
+      </div>
       <draggable
+        v-else
         :model-value="cards"
         item-key="id"
         group="cards"
@@ -56,7 +64,7 @@
 
 <script setup>
 import { ref, nextTick } from 'vue'
-import { MoreFilled, Plus } from '@element-plus/icons-vue'
+import { MoreFilled, Plus, WarningFilled } from '@element-plus/icons-vue'
 import draggable from 'vuedraggable'
 import TaskCard from './TaskCard.vue'
 import { cardApi } from '../api/index.js'
@@ -64,10 +72,11 @@ import { cardApi } from '../api/index.js'
 const props = defineProps({
   column: { type: Object, required: true },
   cards: { type: Array, default: () => [] },
+  cardsError: { type: String, default: '' },
   allColumns: { type: Array, default: () => [] }
 })
 
-const emit = defineEmits(['add-card', 'edit-card', 'delete-card', 'move-card', 'rename-column', 'delete-column'])
+const emit = defineEmits(['add-card', 'edit-card', 'delete-card', 'move-card', 'rename-column', 'delete-column', 'retry-cards'])
 
 const isEditing = ref(false)
 const editName = ref('')
@@ -174,6 +183,22 @@ async function onCardDragEnd(evt) {
 .column-cards::-webkit-scrollbar-thumb {
   background: #c0c4cc;
   border-radius: 3px;
+}
+
+.cards-error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 24px 12px;
+  color: #f56c6c;
+  text-align: center;
+}
+
+.cards-error p {
+  margin: 0;
+  font-size: 12px;
+  color: #909399;
 }
 
 .column-footer {

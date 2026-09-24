@@ -27,6 +27,28 @@ router.get('/', (req, res) => {
   }
 });
 
+// GET /api/boards/:id - Get a single board
+router.get('/:id', (req, res) => {
+  const db = getDb();
+  try {
+    const board = db.prepare(`
+      SELECT b.*,
+        (SELECT COUNT(*) FROM columns WHERE board_id = b.id) AS column_count,
+        (SELECT COUNT(*) FROM cards c JOIN columns col ON c.column_id = col.id WHERE col.board_id = b.id) AS card_count
+      FROM boards b
+      WHERE b.id = ? AND b.user_id = ?
+    `).get(req.params.id, req.user.id);
+    db.close();
+    if (!board) {
+      return res.status(404).json({ error: 'Board not found' });
+    }
+    res.json(board);
+  } catch (err) {
+    db.close();
+    res.status(500).json({ error: 'Failed to fetch board' });
+  }
+});
+
 // POST /api/boards - Create board
 router.post('/', (req, res) => {
   const { name, description } = req.body;

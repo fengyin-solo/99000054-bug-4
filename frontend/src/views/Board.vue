@@ -6,7 +6,12 @@
         <h2 v-if="boardStore.currentBoard">{{ boardStore.currentBoard.name }}</h2>
       </div>
       <div class="board-actions">
-        <el-button type="primary" :icon="Plus" @click="showAddColumn = true">
+        <el-button
+          type="primary"
+          :icon="Plus"
+          :disabled="boardStore.loading || !!boardStore.loadError || !boardStore.currentBoard"
+          @click="showAddColumn = true"
+        >
           Add Column
         </el-button>
       </div>
@@ -15,6 +20,21 @@
     <div v-if="boardStore.loading" class="loading-state">
       <el-icon class="is-loading" :size="32"><Loading /></el-icon>
       <p>Loading board...</p>
+    </div>
+
+    <div v-else-if="boardStore.loadError" class="error-state">
+      <el-result icon="error" :title="boardStore.loadError" sub-title="The board could not be loaded.">
+        <template #extra>
+          <el-button type="primary" @click="loadBoard">Retry</el-button>
+          <el-button @click="$router.push('/')">Back to Boards</el-button>
+        </template>
+      </el-result>
+    </div>
+
+    <div v-else-if="boardStore.columns.length === 0" class="empty-state">
+      <el-empty description="This board has no columns yet.">
+        <el-button type="primary" :icon="Plus" @click="showAddColumn = true">Add Column</el-button>
+      </el-empty>
     </div>
 
     <div v-else class="columns-container">
@@ -30,6 +50,7 @@
           <Column
             :column="column"
             :cards="boardStore.cards[column.id] || []"
+            :cards-error="boardStore.cardErrors[column.id] || ''"
             :all-columns="boardStore.columns"
             @add-card="handleAddCard"
             @edit-card="openCardDetail"
@@ -37,6 +58,7 @@
             @move-card="handleMoveCard"
             @rename-column="handleRenameColumn"
             @delete-column="confirmDeleteColumn"
+            @retry-cards="retryCards"
           />
         </template>
       </draggable>
@@ -74,7 +96,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, ArrowLeft, Loading } from '@element-plus/icons-vue'
@@ -96,32 +118,43 @@ const addingToColumnId = ref(null)
 const showCardDetail = ref(false)
 const selectedCard = ref(null)
 
-onMounted(async () => {
+// Load the board that matches the current URL. The store clears any
+// previous board's columns/cards/errors before fetching, so the page
+// never shows data belonging to another board.
+async function loadBoard() {
   const boardId = parseInt(route.params.id)
-  boardStore.currentBoard = { id: boardId, name: 'Loading...' }
-  try {
-    await boardStore.fetchColumns(boardId)
-    await boardStore.fetchAllCards(boardId)
-    // Get board name from boards list or set from URL
-    const boards = boardStore.boards
-    const found = boards.find(b => b.id === boardId)
-    if (found) {
-      boardStore.currentBoard = found
-    } else {
-      // Fetch boards to get the name
-      await boardStore.fetchBoards()
-      const b = boardStore.boards.find(b => b.id === boardId)
-      if (b) boardStore.currentBoard = b
-    }
-  } catch (err) {
-    ElMessage.error('Failed to load board')
-    router.push('/')
+  if (Number.isNaN(boardId)) {
+    router.replace('/')
+    return
+  }
+  // Close any dialogs tied to the previous board's data
+  showAddCard.value = false
+  showCardDetail.value = false
+  selectedCard.value = null
+  await boardStore.loadBoard(boardId)
+}
+
+onMounted(loadBoard)
+
+// The component is reused when navigating between boards
+// (e.g. /board/1 -> /board/2), so reload whenever the id changes.
+watch(() => route.params.id, (newId, oldId) => {
+  if (newId && newId !== oldId) {
+    loadBoard()
   }
 })
 
 onUnmounted(() => {
   boardStore.clearBoard()
 })
+
+async function retryCards(columnId) {
+  try {
+    await boardStore.fetchCards(columnId)
+  } catch (err) {
+    ElMessage.error('Failed to load cards')
+  }
+}
 
 async function handleAddColumn() {
   if (!newColumnName.value.trim()) return
@@ -275,5 +308,19 @@ async function onColumnDragEnd(evt) {
 
 .loading-state p {
   margin-top: 12px;
+}
+
+.error-state {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.empty-state {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 </style>
