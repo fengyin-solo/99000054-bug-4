@@ -36,6 +36,7 @@ export const authApi = {
 // Boards
 export const boardApi = {
   list: () => api.get('/boards'),
+  get: (id) => api.get(`/boards/${id}`),
   create: (name, description) => api.post('/boards', { name, description }),
   delete: (id) => api.delete(`/boards/${id}`)
 }

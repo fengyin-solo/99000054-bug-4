@@ -3,13 +3,25 @@ import { ref } from 'vue'
 import { boardApi, columnApi, cardApi } from '../api/index.js'
 
 export const useBoardStore = defineStore('board', () => {
+  // Boards list state (Home page)
   const boards = ref([])
+  const loading = ref(false)
+
+  // Current board view state (Board page)
   const currentBoard = ref(null)
   const columns = ref([])
   const cards = ref({}) // keyed by columnId -> [cards]
-  const loading = ref(false)
+  const boardLoading = ref(false)
+  const boardError = ref('')
+  // per-column card load state: columnId -> 'loading' | 'success' | 'error'
+  const cardLoadState = ref({})
+  const cardLoadError = ref({}) // columnId -> error message
 
-  // Board actions
+  // Bumped on every (re)load / reset so stale responses from a previous
+  // board can never overwrite the board currently shown in the URL.
+  let activeLoadId = 0
+
+  // Board list actions
   async function fetchBoards() {
     loading.value = true
     try {
@@ -31,26 +43,138 @@ export const useBoardStore = defineStore('board', () => {
     boards.value = boards.value.filter(b => b.id !== id)
   }
 
-  // Column actions
-  async function fetchColumns(boardId) {
-    loading.value = true
+  // Board view actions
+
+  // Reset every piece of board-view state. The bumped load id also
+  // invalidates any in-flight load that belongs to the previous board.
+  function resetBoard() {
+    activeLoadId += 1
+    currentBoard.value = null
+    columns.value = []
+    cards.value = {}
+    cardLoadState.value = {}
+    cardLoadError.value = {}
+    boardLoading.value = false
+    boardError.value = ''
+  }
+
+  // Fetch board meta + columns + all cards for a board.
+  // Board/columns failure -> board-level error with retry entry.
+  // A single column's cards failing -> that column shows its own retry,
+  // the rest of the board stays usable.
+  async function loadBoard(boardId) {
+    const loadId = ++activeLoadId
+
+    boardLoading.value = true
+    boardError.value = ''
+    currentBoard.value = { id: boardId, name: 'Loading...' }
+    columns.value = []
+    cards.value = {}
+    cardLoadState.value = {}
+    cardLoadError.value = {}
+
     try {
-      const res = await columnApi.list(boardId)
-      columns.value = res.data
-      // Initialize cards map
-      cards.value = {}
-      for (const col of res.data) {
-        cards.value[col.id] = []
+      // Board meta and columns are both required to render the page.
+      const [boardRes, columnsRes] = await Promise.all([
+        boardApi.get(boardId).catch(err => ({ __error: err })),
+        columnApi.list(boardId)
+      ])
+
+      if (loadId !== activeLoadId) return // navigated away / switched board
+
+      // Resolve the name straight from the server; fall back to the
+      // cached boards list, then to a neutral label.
+      if (!boardRes.__error) {
+        currentBoard.value = boardRes.data
+      } else {
+        const cached = boards.value.find(b => b.id === boardId)
+        currentBoard.value = cached
+          ? { ...cached }
+          : { id: boardId, name: `Board #${boardId}` }
       }
+
+      columns.value = columnsRes.data
+      for (const col of columnsRes.data) {
+        cards.value[col.id] = []
+        cardLoadState.value[col.id] = 'loading'
+      }
+
+      await loadCardsForColumns(columnsRes.data.map(col => col.id), loadId)
+    } catch (err) {
+      if (loadId !== activeLoadId) return
+      const status = err.response?.status
+      boardError.value =
+        status === 404
+          ? 'Board not found or you no longer have access to it.'
+          : 'Failed to load board. Please try again.'
+      // Drop the columns/cards of the failed load, but keep the header
+      // showing the id of the board the URL points to.
+      columns.value = []
+      cards.value = {}
+      cardLoadState.value = {}
+      cardLoadError.value = {}
     } finally {
-      loading.value = false
+      if (loadId === activeLoadId) {
+        boardLoading.value = false
+      }
     }
   }
 
+  // Load cards for the given columns in parallel; failures are tracked
+  // per column instead of rejecting the whole board load.
+  async function loadCardsForColumns(columnIds, loadId = activeLoadId) {
+    if (!columnIds.length) return
+    for (const id of columnIds) {
+      cardLoadState.value[id] = 'loading'
+      cardLoadError.value[id] = ''
+    }
+
+    const settled = await Promise.allSettled(
+      columnIds.map(id => cardApi.list(id))
+    )
+
+    if (loadId !== activeLoadId) return // switched board / reset meanwhile
+
+    settled.forEach((result, i) => {
+      const colId = columnIds[i]
+      if (result.status === 'fulfilled') {
+        cards.value[colId] = result.value.data
+        cardLoadState.value[colId] = 'success'
+        cardLoadError.value[colId] = ''
+      } else {
+        // Keep previously visible cards (if any) out of the way and let
+        // the column surface a retry affordance.
+        cards.value[colId] = []
+        cardLoadState.value[colId] = 'error'
+        cardLoadError.value[colId] = 'Failed to load cards'
+      }
+    })
+  }
+
+  // Retry only the cards of one failed column.
+  async function retryColumnCards(columnId) {
+    const loadId = activeLoadId
+    cardLoadState.value[columnId] = 'loading'
+    cardLoadError.value[columnId] = ''
+    try {
+      const res = await cardApi.list(columnId)
+      if (loadId !== activeLoadId) return
+      cards.value[columnId] = res.data
+      cardLoadState.value[columnId] = 'success'
+    } catch (err) {
+      if (loadId !== activeLoadId) return
+      cardLoadState.value[columnId] = 'error'
+      cardLoadError.value[columnId] = 'Failed to load cards'
+    }
+  }
+
+  // Column actions
   async function addColumn(boardId, name) {
     const res = await columnApi.create(boardId, name)
     columns.value.push(res.data)
     cards.value[res.data.id] = []
+    cardLoadState.value[res.data.id] = 'success'
+    cardLoadError.value[res.data.id] = ''
     return res.data
   }
 
@@ -65,38 +189,30 @@ export const useBoardStore = defineStore('board', () => {
     await columnApi.delete(colId)
     columns.value = columns.value.filter(c => c.id !== colId)
     delete cards.value[colId]
+    delete cardLoadState.value[colId]
+    delete cardLoadError.value[colId]
   }
 
-  async function reorderColumn(colId, newPosition) {
-    const res = await columnApi.update(colId, { position: newPosition })
-    // Refresh columns to get correct order
-    if (currentBoard.value) {
-      await fetchColumns(currentBoard.value.id)
+  // Refresh just the column order after a drag; keeps loaded cards intact.
+  async function refreshColumns(boardId) {
+    const res = await columnApi.list(boardId)
+    columns.value = res.data
+    for (const col of res.data) {
+      if (!(col.id in cards.value)) {
+        cards.value[col.id] = []
+        cardLoadState.value[col.id] = 'success'
+      }
     }
-    return res.data
   }
 
   // Card actions
-  async function fetchCards(columnId) {
-    const res = await cardApi.list(columnId)
-    cards.value[columnId] = res.data
-    return res.data
-  }
-
-  async function fetchAllCards(boardId) {
-    // Fetch cards for all columns in parallel
-    const cols = columns.value
-    const promises = cols.map(col => cardApi.list(col.id))
-    const results = await Promise.all(promises)
-    cols.forEach((col, i) => {
-      cards.value[col.id] = results[i].data
-    })
-  }
-
   async function addCard(columnId, data) {
     const res = await cardApi.create(columnId, data)
     if (!cards.value[columnId]) cards.value[columnId] = []
     cards.value[columnId].push(res.data)
+    // A successful write proves the column is reachable again.
+    cardLoadState.value[columnId] = 'success'
+    cardLoadError.value[columnId] = ''
     return res.data
   }
 
@@ -141,17 +257,19 @@ export const useBoardStore = defineStore('board', () => {
     return res.data
   }
 
-  function clearBoard() {
-    currentBoard.value = null
-    columns.value = []
-    cards.value = {}
-  }
-
   return {
-    boards, currentBoard, columns, cards, loading,
+    // state
+    boards, loading,
+    currentBoard, columns, cards,
+    boardLoading, boardError, cardLoadState, cardLoadError,
+    // board list actions
     fetchBoards, createBoard, deleteBoard,
-    fetchColumns, addColumn, renameColumn, deleteColumn, reorderColumn,
-    fetchCards, fetchAllCards, addCard, updateCard, deleteCard, moveCard,
-    clearBoard
+    // board view actions
+    loadBoard, resetBoard, loadCardsForColumns, retryColumnCards,
+    refreshColumns,
+    // column actions
+    addColumn, renameColumn, deleteColumn,
+    // card actions
+    addCard, updateCard, deleteCard, moveCard
   }
 })

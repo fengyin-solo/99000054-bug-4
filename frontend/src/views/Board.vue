@@ -3,18 +3,38 @@
     <div class="board-header">
       <div class="board-title">
         <el-button text :icon="ArrowLeft" @click="$router.push('/')">Back</el-button>
-        <h2 v-if="boardStore.currentBoard">{{ boardStore.currentBoard.name }}</h2>
+        <h2>{{ headerName }}</h2>
       </div>
       <div class="board-actions">
-        <el-button type="primary" :icon="Plus" @click="showAddColumn = true">
+        <el-button
+          v-if="!boardStore.boardLoading && !boardStore.boardError"
+          type="primary"
+          :icon="Plus"
+          @click="openAddColumn"
+        >
           Add Column
         </el-button>
       </div>
     </div>
 
-    <div v-if="boardStore.loading" class="loading-state">
+    <div v-if="boardStore.boardLoading" class="loading-state">
       <el-icon class="is-loading" :size="32"><Loading /></el-icon>
       <p>Loading board...</p>
+    </div>
+
+    <div v-else-if="boardStore.boardError" class="board-error-state">
+      <el-result icon="error" :title="boardStore.boardError" sub-title="Make sure the address is correct, then try again.">
+        <template #extra>
+          <el-button type="primary" @click="reload">Retry</el-button>
+          <el-button @click="$router.push('/')">Back to boards</el-button>
+        </template>
+      </el-result>
+    </div>
+
+    <div v-else-if="boardStore.columns.length === 0" class="board-empty-state">
+      <el-empty description="This board has no columns yet. Add the first one!">
+        <el-button type="primary" :icon="Plus" @click="openAddColumn">Add Column</el-button>
+      </el-empty>
     </div>
 
     <div v-else class="columns-container">
@@ -31,12 +51,15 @@
             :column="column"
             :cards="boardStore.cards[column.id] || []"
             :all-columns="boardStore.columns"
+            :load-state="boardStore.cardLoadState[column.id] || 'success'"
+            :load-error="boardStore.cardLoadError[column.id] || ''"
             @add-card="handleAddCard"
             @edit-card="openCardDetail"
             @delete-card="confirmDeleteCard"
             @move-card="handleMoveCard"
             @rename-column="handleRenameColumn"
             @delete-column="confirmDeleteColumn"
+            @retry-cards="boardStore.retryColumnCards"
           />
         </template>
       </draggable>
@@ -74,7 +97,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, ArrowLeft, Loading } from '@element-plus/icons-vue'
@@ -96,35 +119,42 @@ const addingToColumnId = ref(null)
 const showCardDetail = ref(false)
 const selectedCard = ref(null)
 
-onMounted(async () => {
-  const boardId = parseInt(route.params.id)
-  boardStore.currentBoard = { id: boardId, name: 'Loading...' }
-  try {
-    await boardStore.fetchColumns(boardId)
-    await boardStore.fetchAllCards(boardId)
-    // Get board name from boards list or set from URL
-    const boards = boardStore.boards
-    const found = boards.find(b => b.id === boardId)
-    if (found) {
-      boardStore.currentBoard = found
-    } else {
-      // Fetch boards to get the name
-      await boardStore.fetchBoards()
-      const b = boardStore.boards.find(b => b.id === boardId)
-      if (b) boardStore.currentBoard = b
+const headerName = computed(() => boardStore.currentBoard?.name || 'Board')
+
+// Reload whenever the :id param changes, including the first navigation.
+// Vue Router reuses this component when switching straight between
+// /board/1 and /board/2, so onMounted alone is not enough.
+watch(
+  () => route.params.id,
+  () => {
+    const boardId = Number(route.params.id)
+    if (Number.isNaN(boardId)) {
+      router.replace('/')
+      return
     }
-  } catch (err) {
-    ElMessage.error('Failed to load board')
-    router.push('/')
-  }
+    boardStore.loadBoard(boardId)
+  },
+  { immediate: true }
+)
+
+// Clear shared board state when leaving the page so a later visit
+// never starts with the previous board's columns, cards or error.
+onUnmounted(() => {
+  boardStore.resetBoard()
 })
 
-onUnmounted(() => {
-  boardStore.clearBoard()
-})
+function reload() {
+  const boardId = Number(route.params.id)
+  if (!Number.isNaN(boardId)) boardStore.loadBoard(boardId)
+}
+
+function openAddColumn() {
+  newColumnName.value = ''
+  showAddColumn.value = true
+}
 
 async function handleAddColumn() {
-  if (!newColumnName.value.trim()) return
+  if (!newColumnName.value.trim() || !boardStore.currentBoard) return
   try {
     await boardStore.addColumn(boardStore.currentBoard.id, newColumnName.value.trim())
     newColumnName.value = ''
@@ -212,8 +242,10 @@ async function onColumnDragEnd(evt) {
         await columnApi.update(columns[i].id, { position: i })
         columns[i].position = i
       } catch (err) {
-        // Refresh to get correct state
-        await boardStore.fetchColumns(boardStore.currentBoard.id)
+        // Refresh to get correct state (keeps loaded cards)
+        if (boardStore.currentBoard) {
+          await boardStore.refreshColumns(boardStore.currentBoard.id)
+        }
         break
       }
     }
@@ -275,5 +307,13 @@ async function onColumnDragEnd(evt) {
 
 .loading-state p {
   margin-top: 12px;
+}
+
+.board-error-state,
+.board-empty-state {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 </style>
